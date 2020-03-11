@@ -110,6 +110,14 @@ mod files {
         type Name = &'files str;
         type Source = &'files str;
 
+        type NameError = ();
+        type SourceError = ();
+        type LineIndexError = ();
+        type LineNumberError = ();
+        type LineRangeError = ();
+        type ColumnNumberError = ();
+        type LocationError = ();
+
         fn name(&self, file_id: FileId) -> Option<&str> {
             Some(self.get(file_id)?.name.as_ref())
         }

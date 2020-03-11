@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
 use std::num::NonZeroU32;
 use std::{error, fmt};
+use void::Void;
 
 use crate::{ByteIndex, ColumnIndex, LineIndex, LineOffset, Location, RawIndex, Span};
 
@@ -21,6 +22,12 @@ impl fmt::Display for LineIndexOutOfBoundsError {
             "Line index out of bounds - given: {}, max: {}",
             self.given, self.max
         )
+    }
+}
+
+impl From<Void> for LineIndexOutOfBoundsError {
+    fn from(void: Void) -> LineIndexOutOfBoundsError {
+        match void {}
     }
 }
 
@@ -303,24 +310,36 @@ where
     type Name = String;
     type Source = &'a str;
 
-    fn name(&self, id: FileId) -> Option<String> {
+    type NameError = Void;
+    type SourceError = Void;
+    type LineIndexError = Void;
+    type LineNumberError = Void;
+    type LineRangeError = LineIndexOutOfBoundsError;
+    type ColumnNumberError = LineIndexOutOfBoundsError;
+    type LocationError = LineIndexOutOfBoundsError;
+
+    fn name(&self, id: FileId) -> Result<String, Void> {
         use std::path::PathBuf;
 
-        Some(PathBuf::from(self.name(id)).display().to_string())
+        Ok(PathBuf::from(self.name(id)).display().to_string())
     }
 
-    fn source(&'a self, id: FileId) -> Option<&str> {
-        Some(self.source(id).as_ref())
+    fn source(&'a self, id: FileId) -> Result<&str, Void> {
+        Ok(self.source(id).as_ref())
     }
 
-    fn line_index(&self, id: FileId, byte_index: usize) -> Option<usize> {
-        Some(self.line_index(id, byte_index as u32).to_usize())
+    fn line_index(&self, id: FileId, byte_index: usize) -> Result<usize, Void> {
+        Ok(self.line_index(id, byte_index as u32).to_usize())
     }
 
-    fn line_range(&'a self, id: FileId, line_index: usize) -> Option<std::ops::Range<usize>> {
-        let span = self.line_span(id, line_index as u32).ok()?;
+    fn line_range(
+        &'a self,
+        id: FileId,
+        line_index: usize,
+    ) -> Result<std::ops::Range<usize>, LineIndexOutOfBoundsError> {
+        let span = self.line_span(id, line_index as u32)?;
 
-        Some(span.start().to_usize()..span.end().to_usize())
+        Ok(span.start().to_usize()..span.end().to_usize())
     }
 }
 

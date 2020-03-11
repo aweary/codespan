@@ -23,7 +23,9 @@
 //!
 //! [`salsa`]: https://crates.io/crates/salsa
 
+use std::fmt;
 use std::ops::Range;
+use void::Void;
 
 /// A minimal interface for accessing source files when rendering diagnostics.
 ///
@@ -39,11 +41,29 @@ pub trait Files<'a> {
     /// The source code of a file.
     type Source: 'a + AsRef<str>;
 
+    /// An error that may be returned from [`Files::name`].
+    type NameError: std::error::Error;
+    /// An error that may be returned from [`Files::source`].
+    type SourceError: std::error::Error;
+    /// An error that may be returned from [`Files::line_index`].
+    type LineIndexError: std::error::Error;
+    /// An error that may be returned from [`Files::line_number`].
+    type LineNumberError: std::error::Error;
+    /// An error that may be returned from [`Files::line_range`].
+    type LineRangeError: std::error::Error;
+    /// An error that may be returned from [`Files::column_number`].
+    type ColumnNumberError: std::error::Error + From<Self::SourceError> + From<Self::LineRangeError>;
+    /// An error that may be returned from [`Files::location`].
+    type LocationError: std::error::Error
+        + From<Self::LineIndexError>
+        + From<Self::LineNumberError>
+        + From<Self::ColumnNumberError>;
+
     /// The user-facing name of a file.
-    fn name(&'a self, id: Self::FileId) -> Option<Self::Name>;
+    fn name(&'a self, id: Self::FileId) -> Result<Self::Name, Self::NameError>;
 
     /// The source code of a file.
-    fn source(&'a self, id: Self::FileId) -> Option<Self::Source>;
+    fn source(&'a self, id: Self::FileId) -> Result<Self::Source, Self::SourceError>;
 
     /// The index of the line at the given byte index.
     ///
@@ -56,7 +76,18 @@ pub trait Files<'a> {
     ///
     /// [`line_starts`]: crate::files::line_starts
     /// [`files`]: crate::files
-    fn line_index(&'a self, id: Self::FileId, byte_index: usize) -> Option<usize>;
+    fn line_index(
+        &'a self,
+        id: Self::FileId,
+        byte_index: usize,
+    ) -> Result<usize, Self::LineIndexError>;
+
+    /// The byte range of a line in the source of the file.
+    fn line_range(
+        &'a self,
+        id: Self::FileId,
+        line_index: usize,
+    ) -> Result<Range<usize>, Self::LineRangeError>;
 
     /// The user-facing line number at the given line index.
     ///
@@ -68,8 +99,12 @@ pub trait Files<'a> {
     ///
     /// [line-macro]: https://en.cppreference.com/w/c/preprocessor/line
     #[allow(unused_variables)]
-    fn line_number(&'a self, id: Self::FileId, line_index: usize) -> Option<usize> {
-        Some(line_index + 1)
+    fn line_number(
+        &'a self,
+        id: Self::FileId,
+        line_index: usize,
+    ) -> Result<usize, Self::LineNumberError> {
+        Ok(line_index + 1)
     }
 
     /// The user-facing column number at the given line index and byte index.
@@ -87,27 +122,28 @@ pub trait Files<'a> {
         id: Self::FileId,
         line_index: usize,
         byte_index: usize,
-    ) -> Option<usize> {
+    ) -> Result<usize, Self::ColumnNumberError> {
         let source = self.source(id)?;
         let line_range = self.line_range(id, line_index)?;
         let column_index = column_index(source.as_ref(), line_range, byte_index);
 
-        Some(column_index + 1)
+        Ok(column_index + 1)
     }
 
     /// Convenience method for returning line and column number at the given a
     /// byte index in the file.
-    fn location(&'a self, id: Self::FileId, byte_index: usize) -> Option<Location> {
+    fn location(
+        &'a self,
+        id: Self::FileId,
+        byte_index: usize,
+    ) -> Result<Location, Self::LocationError> {
         let line_index = self.line_index(id, byte_index)?;
 
-        Some(Location {
+        Ok(Location {
             line_number: self.line_number(id, line_index)?,
             column_number: self.column_number(id, line_index, byte_index)?,
         })
     }
-
-    /// The byte range of line in the source of the file.
-    fn line_range(&'a self, id: Self::FileId, line_index: usize) -> Option<Range<usize>>;
 }
 
 /// A user-facing location in a source file.
@@ -195,6 +231,30 @@ pub fn line_starts<'source>(source: &'source str) -> impl 'source + Iterator<Ite
     std::iter::once(0).chain(source.match_indices('\n').map(|(i, _)| i + 1))
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct InvalidLineIndexError {
+    line_index: usize,
+    num_lines: usize,
+}
+
+impl std::error::Error for InvalidLineIndexError {}
+
+impl fmt::Display for InvalidLineIndexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Invalid line index `{}`, expected an index below `{}`",
+            self.line_index, self.num_lines,
+        )
+    }
+}
+
+impl From<Void> for InvalidLineIndexError {
+    fn from(void: Void) -> InvalidLineIndexError {
+        match void {}
+    }
+}
+
 /// A file database that contains a single source file.
 ///
 /// Because there is only single file in this database we use `()` as a [`FileId`].
@@ -237,13 +297,16 @@ where
         &self.source
     }
 
-    fn line_start(&self, line_index: usize) -> Option<usize> {
+    fn line_start(&self, line_index: usize) -> Result<usize, InvalidLineIndexError> {
         use std::cmp::Ordering;
 
         match line_index.cmp(&self.line_starts.len()) {
-            Ordering::Less => self.line_starts.get(line_index).cloned(),
-            Ordering::Equal => Some(self.source.as_ref().len()),
-            Ordering::Greater => None,
+            Ordering::Less => Ok(self.line_starts[line_index]),
+            Ordering::Equal => Ok(self.source.as_ref().len()),
+            Ordering::Greater => Err(InvalidLineIndexError {
+                line_index,
+                num_lines: self.line_starts.len(),
+            }),
         }
     }
 }
@@ -257,26 +320,88 @@ where
     type Name = Name;
     type Source = &'a str;
 
-    fn name(&self, (): ()) -> Option<Name> {
-        Some(self.name.clone())
+    type NameError = Void;
+    type SourceError = Void;
+    type LineIndexError = Void;
+    type LineNumberError = Void;
+    type LineRangeError = InvalidLineIndexError;
+    type ColumnNumberError = InvalidLineIndexError;
+    type LocationError = InvalidLineIndexError;
+
+    fn name(&self, (): ()) -> Result<Name, Void> {
+        Ok(self.name.clone())
     }
 
-    fn source(&self, (): ()) -> Option<&str> {
-        Some(self.source.as_ref())
+    fn source(&self, (): ()) -> Result<&str, Void> {
+        Ok(self.source.as_ref())
     }
 
-    fn line_index(&self, (): (), byte_index: usize) -> Option<usize> {
+    fn line_index(&self, (): (), byte_index: usize) -> Result<usize, Void> {
         match self.line_starts.binary_search(&byte_index) {
-            Ok(line) => Some(line),
-            Err(next_line) => Some(next_line - 1),
+            Ok(line) => Ok(line),
+            Err(next_line) => Ok(next_line - 1),
         }
     }
 
-    fn line_range(&self, (): (), line_index: usize) -> Option<Range<usize>> {
+    fn line_range(&self, (): (), line_index: usize) -> Result<Range<usize>, InvalidLineIndexError> {
         let line_start = self.line_start(line_index)?;
         let next_line_start = self.line_start(line_index + 1)?;
 
-        Some(line_start..next_line_start)
+        Ok(line_start..next_line_start)
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct InvalidFileIdError {
+    pub file_id: usize,
+    pub num_files: usize,
+}
+
+impl std::error::Error for InvalidFileIdError {}
+
+impl fmt::Display for InvalidFileIdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Invalid file id `{}`, expected a file id below `{}`",
+            self.file_id, self.num_files,
+        )
+    }
+}
+
+impl From<Void> for InvalidFileIdError {
+    fn from(void: Void) -> InvalidFileIdError {
+        match void {}
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum LineRangeError {
+    InvalidFileId(InvalidFileIdError),
+    InvalidLineIndex(InvalidLineIndexError),
+}
+
+impl std::error::Error for LineRangeError {}
+
+impl fmt::Display for LineRangeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Line range error: ")?;
+        match self {
+            LineRangeError::InvalidFileId(error) => write!(f, "{}", error),
+            LineRangeError::InvalidLineIndex(error) => write!(f, "{}", error),
+        }
+    }
+}
+
+impl From<InvalidFileIdError> for LineRangeError {
+    fn from(error: InvalidFileIdError) -> LineRangeError {
+        LineRangeError::InvalidFileId(error)
+    }
+}
+
+impl From<InvalidLineIndexError> for LineRangeError {
+    fn from(error: InvalidLineIndexError) -> LineRangeError {
+        LineRangeError::InvalidLineIndex(error)
     }
 }
 
@@ -308,8 +433,11 @@ where
     }
 
     /// Get the file corresponding to the given id.
-    pub fn get(&self, file_id: usize) -> Option<&SimpleFile<Name, Source>> {
-        self.files.get(file_id)
+    pub fn get(&self, file_id: usize) -> Result<&SimpleFile<Name, Source>, InvalidFileIdError> {
+        self.files.get(file_id).ok_or_else(|| InvalidFileIdError {
+            file_id,
+            num_files: self.files.len(),
+        })
     }
 }
 
@@ -322,20 +450,32 @@ where
     type Name = Name;
     type Source = &'a str;
 
-    fn name(&self, file_id: usize) -> Option<Name> {
-        Some(self.get(file_id)?.name().clone())
+    type NameError = InvalidFileIdError;
+    type SourceError = InvalidFileIdError;
+    type LineIndexError = InvalidFileIdError;
+    type LineNumberError = InvalidFileIdError;
+    type LineRangeError = LineRangeError;
+    type ColumnNumberError = LineRangeError;
+    type LocationError = LineRangeError;
+
+    fn name(&self, file_id: usize) -> Result<Name, InvalidFileIdError> {
+        Ok(self.get(file_id)?.name().clone())
     }
 
-    fn source(&self, file_id: usize) -> Option<&str> {
-        Some(self.get(file_id)?.source().as_ref())
+    fn source(&self, file_id: usize) -> Result<&str, InvalidFileIdError> {
+        Ok(self.get(file_id)?.source().as_ref())
     }
 
-    fn line_index(&self, file_id: usize, byte_index: usize) -> Option<usize> {
-        self.get(file_id)?.line_index((), byte_index)
+    fn line_index(&self, file_id: usize, byte_index: usize) -> Result<usize, InvalidFileIdError> {
+        Ok(self.get(file_id)?.line_index((), byte_index)?)
     }
 
-    fn line_range(&self, file_id: usize, line_index: usize) -> Option<Range<usize>> {
-        self.get(file_id)?.line_range((), line_index)
+    fn line_range(
+        &self,
+        file_id: usize,
+        line_index: usize,
+    ) -> Result<Range<usize>, LineRangeError> {
+        Ok(self.get(file_id)?.line_range((), line_index)?)
     }
 }
 

@@ -27,9 +27,9 @@ where
         RichDiagnostic { diagnostic }
     }
 
-    pub fn render<'files>(
+    pub fn render<'files, F: Files<'files, FileId = FileId>>(
         &self,
-        files: &'files impl Files<'files, FileId = FileId>,
+        files: &'files F,
         renderer: &mut Renderer<'_, '_>,
     ) -> io::Result<()>
     where
